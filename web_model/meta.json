@@ -1,0 +1,28 @@
+{
+  "name": "RankNet",
+  "description": "Neural network predicting exam percentile (0-100) from score, avg, topper, and max marks.",
+  "inputs": [
+    "x_norm = (score - avg) / (topper - avg)",
+    "maxMarks_norm = maxMarks / 300",
+    "difficulty = avg / maxMarks"
+  ],
+  "output": "percentile (0-1)",
+  "avg_N": 592.3,
+  "maxMarks_ref": 300,
+  "stat_constants": {
+    "slope_tgn": -0.3567,
+    "intercept_tgn": 0.53,
+    "slope_k": -0.85,
+    "intercept_k": 2.85
+  },
+  "evaluation": {
+    "test_mae_percentile": 4.47,
+    "test_mse": 65.25,
+    "r2_score": 0.912,
+    "within_3_percentile_pct": 59.12,
+    "within_5_percentile_pct": 73.74,
+    "within_10_percentile_pct": 89.47,
+    "total_trained_samples": 3176,
+    "test_samples": 636
+  }
+}

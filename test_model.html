@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RankNet - Neural Network Exam Predictor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(18, 24, 38, 0.85);
+      --border: rgba(255, 255, 255, 0.1);
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --accent-glow: rgba(99, 102, 241, 0.35);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, var(--bg) 75%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2.5rem 1rem;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 800px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.85rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      background: rgba(99, 102, 241, 0.15);
+      color: #a5b4fc;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      margin-bottom: 0.75rem;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warning);
+      box-shadow: 0 0 8px var(--warning);
+      transition: all 0.3s ease;
+    }
+
+    .status-dot.ready {
+      background: var(--success);
+      box-shadow: 0 0 10px var(--success);
+    }
+
+    h1 {
+      font-size: 2.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #fff 30%, #a5b4fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.5rem;
+    }
+
+    p.subtitle {
+      color: var(--text-muted);
+      font-size: 1rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
+      padding: 2rem;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5), 0 0 25px rgba(99, 102, 241, 0.05);
+      margin-bottom: 1.5rem;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+
+    @media (max-width: 640px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    label {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    input[type="number"] {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      color: #fff;
+      padding: 0.75rem 1rem;
+      font-size: 1rem;
+      font-family: 'Outfit', sans-serif;
+      transition: all 0.2s;
+    }
+
+    input[type="number"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .presets {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+
+    .btn-preset {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 0.4rem 0.85rem;
+      border-radius: 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-preset:hover {
+      background: rgba(99, 102, 241, 0.15);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn-predict {
+      width: 100%;
+      background: linear-gradient(135deg, var(--accent) 0%, #4338ca 100%);
+      color: white;
+      border: none;
+      border-radius: 0.75rem;
+      padding: 0.9rem;
+      font-size: 1.05rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 8px 20px -4px var(--accent-glow);
+      transition: all 0.2s ease;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn-predict:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 25px -4px var(--accent-glow);
+    }
+
+    .btn-predict:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .results-card {
+      display: none;
+      animation: fadeIn 0.4s ease-out forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .main-metric {
+      font-size: 3rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      line-height: 1;
+    }
+
+    .progress-bar-bg {
+      width: 100%;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #6366f1, #10b981);
+      border-radius: 999px;
+      transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 0.85rem;
+      padding: 1rem;
+      border: 1px solid var(--border);
+    }
+
+    @media (max-width: 640px) {
+      .stats-grid { grid-template-columns: 1fr; }
+    }
+
+    .stat-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .stat-value {
+      font-size: 1.15rem;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .model-info {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .model-info code {
+      font-family: 'JetBrains Mono', monospace;
+      color: #a5b4fc;
+      background: rgba(99, 102, 241, 0.1);
+      padding: 0.15rem 0.35rem;
+      border-radius: 0.3rem;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div class="badge">
+      <div id="status-dot" class="status-dot"></div>
+      <span id="status-text">Loading TensorFlow.js model...</span>
+    </div>
+    <h1>RankNet Predictor</h1>
+    <p class="subtitle">Neural network trained on full exam history to predict percentile and rank in real-time.</p>
+  </header>
+
+  <div class="card">
+    <div class="presets">
+      <span style="font-size: 0.8rem; color: var(--text-muted); align-self: center; margin-right: 0.5rem;">Presets:</span>
+      <button type="button" class="btn-preset" onclick="setPreset(210, 300, 120, 275, 600)">Top Performer</button>
+      <button type="button" class="btn-preset" onclick="setPreset(135, 300, 120, 275, 600)">Above Average</button>
+      <button type="button" class="btn-preset" onclick="setPreset(105, 300, 120, 275, 600)">Below Average</button>
+      <button type="button" class="btn-preset" onclick="setPreset(55, 186, 40, 110, 350)">186 Max Paper</button>
+    </div>
+
+    <div class="grid-2">
+      <div class="field">
+        <label for="inp-score">Your Score</label>
+        <input type="number" id="inp-score" value="180" step="1">
+      </div>
+      <div class="field">
+        <label for="inp-max">Max Marks</label>
+        <input type="number" id="inp-max" value="300" step="1">
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="field">
+        <label for="inp-avg">Test Average Marks</label>
+        <input type="number" id="inp-avg" value="122.5" step="0.5">
+      </div>
+      <div class="field">
+        <label for="inp-topper">
+          <span>Topper Marks</span>
+          <span style="color: #818cf8; font-size: 0.75rem; cursor: pointer;" onclick="autoFillTopper()">[Auto-Estimate]</span>
+        </label>
+        <input type="number" id="inp-topper" value="275" step="1">
+      </div>
+    </div>
+
+    <div class="field" style="margin-bottom: 1.5rem;">
+      <label for="inp-n">Total Students (Optional for Rank)</label>
+      <input type="number" id="inp-n" value="600" step="1">
+    </div>
+
+    <button type="button" id="btn-predict" class="btn-predict" onclick="predict()" disabled>
+      Predict Percentile &amp; Rank
+    </button>
+  </div>
+
+  <div id="results-card" class="card results-card">
+    <div class="results-header">
+      <div>
+        <div style="font-size: 0.85rem; color: var(--text-muted); font-weight: 500;">PREDICTED PERCENTILE</div>
+        <div id="res-pct" class="main-metric">--%</div>
+      </div>
+      <div style="text-align: right;">
+        <div style="font-size: 0.85rem; color: var(--text-muted); font-weight: 500;">ESTIMATED RANK</div>
+        <div id="res-rank" style="font-size: 2rem; font-weight: 700; color: #fff;">--</div>
+        <div id="res-rank-sub" style="font-size: 0.75rem; color: var(--text-muted);">out of --</div>
+      </div>
+    </div>
+
+    <div class="progress-bar-bg">
+      <div id="res-progress" class="progress-bar-fill"></div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-item">
+        <span class="stat-label">Difficulty (Avg/Max)</span>
+        <span id="stat-diff" class="stat-value">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Normalized Gap (x_norm)</span>
+        <span id="stat-xnorm" class="stat-value">--</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Inference Time</span>
+        <span id="stat-time" class="stat-value">--</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="model-info">
+    <p>Loaded from <code>web_model/model.json</code> and <code>web_model/group1-shard1of1.bin</code></p>
+    <p>Powered by TensorFlow.js client-side inference &bull; Zero backend dependencies</p>
+  </div>
+</div>
+
+<script>
+  let model = null;
+  let meta = null;
+
+  async function initModel() {
+    const dot = document.getElementById("status-dot");
+    const text = document.getElementById("status-text");
+    const btn = document.getElementById("btn-predict");
+
+    try {
+      // Load both model and metadata
+      const [loadedModel, loadedMeta] = await Promise.all([
+        tf.loadLayersModel("web_model/model.json"),
+        fetch("web_model/meta.json").then(r => r.json())
+      ]);
+
+      model = loadedModel;
+      meta = loadedMeta;
+
+      dot.classList.add("ready");
+      text.textContent = "Model Loaded & Ready";
+      btn.disabled = false;
+      console.log("RankNet model loaded successfully:", model);
+    } catch (e) {
+      console.error("Failed to load model:", e);
+      text.textContent = "Failed to load: " + e.message;
+      dot.style.background = "#ef4444";
+      dot.style.boxShadow = "0 0 10px #ef4444";
+    }
+  }
+
+  function autoFillTopper() {
+    const avg = parseFloat(document.getElementById("inp-avg").value) || 0;
+    const maxMarks = parseFloat(document.getElementById("inp-max").value) || 300;
+    if (meta && meta.stat_constants) {
+      const { slope_tgn, intercept_tgn } = meta.stat_constants;
+      const diff = avg / maxMarks;
+      const tgn = slope_tgn * diff + intercept_tgn;
+      const top = Math.min(maxMarks, avg + tgn * maxMarks);
+      document.getElementById("inp-topper").value = Math.round(top);
+    } else {
+      document.getElementById("inp-topper").value = Math.round(Math.min(maxMarks, avg + 0.45 * maxMarks));
+    }
+  }
+
+  function setPreset(score, maxM, avg, topper, n) {
+    document.getElementById("inp-score").value = score;
+    document.getElementById("inp-max").value = maxM;
+    document.getElementById("inp-avg").value = avg;
+    document.getElementById("inp-topper").value = topper;
+    document.getElementById("inp-n").value = n;
+    predict();
+  }
+
+  async function predict() {
+    if (!model) return;
+
+    const score = parseFloat(document.getElementById("inp-score").value);
+    const maxMarks = parseFloat(document.getElementById("inp-max").value);
+    const avg = parseFloat(document.getElementById("inp-avg").value);
+    let topper = parseFloat(document.getElementById("inp-topper").value);
+    const totalN = parseFloat(document.getElementById("inp-n").value);
+
+    if (isNaN(score) || isNaN(maxMarks) || isNaN(avg)) {
+      alert("Please enter valid numeric values for Score, Max Marks, and Average.");
+      return;
+    }
+
+    if (isNaN(topper) || topper <= avg) {
+      autoFillTopper();
+      topper = parseFloat(document.getElementById("inp-topper").value);
+    }
+
+    const t0 = performance.now();
+
+    // Feature normalization
+    const difficulty = avg / maxMarks;
+    const sc = meta?.stat_constants || { slope_tgn: -0.6776, intercept_tgn: 0.8130, slope_k: -4.6774, intercept_k: 4.5740 };
+    const k = sc.slope_k * difficulty + sc.intercept_k;
+    const sigma = k > 0 ? (topper - avg) / k : 1.0;
+    const z = sigma > 0 ? (score - avg) / sigma : 0.0;
+    const gap = topper - avg;
+    let x_norm = gap > 0 ? (score - avg) / gap : 0.0;
+    x_norm = Math.max(0.01, Math.min(x_norm, 1.0));
+    const max_norm = maxMarks / 300.0;
+
+    // Run inference with TF.js (supports 4-feature [z, x_norm, difficulty, maxMarks_norm] or 3-feature)
+    let inputTensor;
+    if (meta?.inputs?.[0] === "z" || model.inputs?.[0]?.shape?.[1] === 4) {
+      inputTensor = tf.tensor2d([[z, x_norm, difficulty, max_norm]]);
+    } else {
+      inputTensor = tf.tensor2d([[x_norm, max_norm, difficulty]]);
+    }
+    const outputTensor = model.predict(inputTensor);
+    const predArray = await outputTensor.data();
+    const t1 = performance.now();
+
+    const pct = Math.max(0.01, Math.min(99.99, predArray[0] * 100.0));
+
+    inputTensor.dispose();
+    outputTensor.dispose();
+
+    // Update UI
+    const resCard = document.getElementById("results-card");
+    resCard.style.display = "block";
+
+    document.getElementById("res-pct").textContent = pct.toFixed(2) + "%";
+    document.getElementById("res-progress").style.width = pct.toFixed(1) + "%";
+
+    if (!isNaN(totalN) && totalN > 0) {
+      const estimatedRank = Math.max(1, Math.round(totalN * (1.0 - pct / 100.0)));
+      document.getElementById("res-rank").textContent = "~" + estimatedRank;
+      document.getElementById("res-rank-sub").textContent = "out of " + Math.round(totalN);
+    } else {
+      document.getElementById("res-rank").textContent = "--";
+      document.getElementById("res-rank-sub").textContent = "enter total students";
+    }
+
+    document.getElementById("stat-diff").textContent = (difficulty * 100).toFixed(1) + "%";
+    document.getElementById("stat-xnorm").textContent = x_norm.toFixed(3);
+    document.getElementById("stat-time").textContent = (t1 - t0).toFixed(1) + " ms";
+  }
+
+  window.addEventListener("DOMContentLoaded", initModel);
+</script>
+</body>
+</html>
