@@ -1,60 +1,8 @@
-import json
-import os
-import glob
+import json, os, glob
 import numpy as np
 import tensorflow as tf
 
-SEED = 42
-tf.random.set_seed(SEED)
 os.makedirs("output/ranknet", exist_ok=True)
-
-def save_keras_model_tfjs(model, output_dir):
-    """Exports a Keras model directly into TensorFlow.js Layers format (model.json + group1-shard1of1.bin) without requiring tensorflowjs library."""
-    os.makedirs(output_dir, exist_ok=True)
-    weights_manifest = []
-    weight_specs = []
-    bin_bytes = bytearray()
-
-    for layer in model.layers:
-        for weight in layer.weights:
-            w_name = weight.name
-            if w_name.endswith(":0"):
-                w_name = w_name[:-2]
-            w_arr = weight.numpy()
-            weight_specs.append({
-                "name": w_name,
-                "shape": list(w_arr.shape),
-                "dtype": "float32"
-            })
-            bin_bytes.extend(w_arr.astype("<f4").tobytes())
-
-    shard_filename = "group1-shard1of1.bin"
-    weights_manifest.append({
-        "paths": [shard_filename],
-        "weights": weight_specs
-    })
-
-    with open(os.path.join(output_dir, shard_filename), "wb") as f:
-        f.write(bin_bytes)
-
-    keras_version = getattr(tf.keras, "__version__", "2.15.0")
-    model_json = {
-        "format": "layers-model",
-        "generatedBy": f"keras v{keras_version}",
-        "convertedBy": "TensorFlow.js Exporter",
-        "modelTopology": {
-            "keras_version": keras_version,
-            "backend": "tensorflow",
-            "model_config": {
-                "class_name": model.__class__.__name__,
-                "config": model.get_config()
-            }
-        },
-        "weightsManifest": weights_manifest
-    }
-
-    with open(os.path.join(output_dir, "model.json"), "w", encoding="utf-8") as f:
-        json.dump(model_json, f, indent=2)
 
 # ── Fitted statistical constants ──────────────────────────────────────────────
 
@@ -135,32 +83,29 @@ for sf in student_files:
             n_lookup[name] = []
         n_lookup[name].append(N)
 
-# Compute mean N per test
-n_lookup_avg = {name: float(np.mean(vals)) for name, vals in n_lookup.items()}
-avg_N = float(np.mean(list(n_lookup_avg.values()))) if n_lookup_avg else 500.0
-print(f"N lookup built for {len(n_lookup_avg)} tests | avg N: {avg_N:.0f}")
+avg_N = float(np.mean([np.mean(vals) for vals in n_lookup.values()])) if n_lookup else 500.0
+print(f"N lookup built for {len(n_lookup)} tests | avg N: {avg_N:.0f}")
 
 # ── Build training points ─────────────────────────────────────────────────────
 
 points = []
 
 # Leaderboard points
-tests_list = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
-
-for test in tests_list:
+lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
+for test in lb_tests:
     name   = test.get("testName")
     avg    = test.get("avg") or avg_lookup.get(name)
     topper = test.get("topper") or topper_lookup.get(name)
-    lb     = test.get("leaderboard")
-    if lb is None and isinstance(test.get("summary"), dict):
+    lb     = test.get("leaderboard", [])
+    if not lb and isinstance(test.get("summary"), dict):
         lb = test["summary"].get("leaderboard", [])
 
     if not avg or not topper or not lb:    continue
     if topper <= avg:                      continue
-    if name not in n_lookup_avg:           continue
+    if name not in n_lookup:               continue
     if name not in max_marks_lookup:       continue
 
-    N        = n_lookup_avg[name]
+    N        = float(np.mean(n_lookup[name]))
     maxMarks = max_marks_lookup[name]
 
     for entry in lb:
@@ -196,10 +141,15 @@ for sf in student_files:
         maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
         if not maxMarks:                                           continue
 
-        avg    = test.get("avg") or avg_lookup.get(name)
-        topper = test.get("topper") or topper_lookup.get(name)
-        N      = n_lookup_avg.get(name)
-        if not N or not avg or not topper or topper <= avg:        continue
+        lb = next((l for l in lb_tests if l.get("testName") == name), None)
+        if not lb or not (lb.get("avg") or avg_lookup.get(name)) or not (lb.get("topper") or topper_lookup.get(name)):
+            continue
+
+        avg    = lb.get("avg") or avg_lookup.get(name)
+        topper = lb.get("topper") or topper_lookup.get(name)
+        n_vals = n_lookup.get(name)
+        if not n_vals or topper <= avg:                            continue
+        N      = float(np.mean(n_vals))
 
         y = 1.0 - (test["rank"] / N)
         if not (0 < y < 1.0):                                     continue
@@ -255,7 +205,44 @@ print(f"Worst — z:{X[worst,0]:.3f} x:{X[worst,1]:.3f} diff:{X[worst,2]:.3f} ac
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 
-save_keras_model_tfjs(model, "output/ranknet")
+try:
+    import tensorflowjs as tfjs
+    tfjs.converters.save_keras_model(model, "output/ranknet")
+except Exception:
+    weights_manifest = []
+    weight_specs = []
+    bin_bytes = bytearray()
+    for layer in model.layers:
+        for w in layer.weights:
+            w_name = w.name.split(":")[0]
+            arr = w.numpy()
+            weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
+            bin_bytes.extend(arr.astype("<f4").tobytes())
+
+    shard_name = "group1-shard1of1.bin"
+    weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
+
+    with open(f"output/ranknet/{shard_name}", "wb") as f:
+        f.write(bin_bytes)
+
+    keras_ver = getattr(tf.keras, "__version__", "2.15.0")
+    model_json = {
+        "format": "layers-model",
+        "generatedBy": f"keras v{keras_ver}",
+        "convertedBy": "TensorFlow.js Exporter",
+        "modelTopology": {
+            "keras_version": keras_ver,
+            "backend": "tensorflow",
+            "model_config": {
+                "class_name": model.__class__.__name__,
+                "config": model.get_config()
+            }
+        },
+        "weightsManifest": weights_manifest
+    }
+
+    with open("output/ranknet/model.json", "w", encoding="utf-8") as f:
+        json.dump(model_json, f, indent=2)
 
 meta = {
     "inputs":       ["z", "x_norm", "difficulty", "maxMarks_norm"],
