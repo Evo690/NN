@@ -205,44 +205,68 @@ print(f"Worst — z:{X[worst,0]:.3f} x:{X[worst,1]:.3f} diff:{X[worst,2]:.3f} ac
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 
-try:
-    import tensorflowjs as tfjs
-    tfjs.converters.save_keras_model(model, "output/ranknet")
-except Exception:
-    weights_manifest = []
-    weight_specs = []
-    bin_bytes = bytearray()
-    for layer in model.layers:
-        for w in layer.weights:
-            w_name = w.name.split(":")[0]
-            arr = w.numpy()
-            weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
-            bin_bytes.extend(arr.astype("<f4").tobytes())
+weights_manifest = []
+weight_specs = []
+bin_bytes = bytearray()
+for layer in model.layers:
+    for w in layer.weights:
+        w_name = w.name.split(":")[0]
+        arr = w.numpy()
+        weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
+        bin_bytes.extend(arr.astype("<f4").tobytes())
 
-    shard_name = "group1-shard1of1.bin"
-    weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
+shard_name = "group1-shard1of1.bin"
+weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
 
-    with open(f"output/ranknet/{shard_name}", "wb") as f:
-        f.write(bin_bytes)
+with open(f"output/ranknet/{shard_name}", "wb") as f:
+    f.write(bin_bytes)
 
-    keras_ver = getattr(tf.keras, "__version__", "2.15.0")
-    model_json = {
-        "format": "layers-model",
-        "generatedBy": f"keras v{keras_ver}",
-        "convertedBy": "TensorFlow.js Exporter",
-        "modelTopology": {
-            "keras_version": keras_ver,
-            "backend": "tensorflow",
-            "model_config": {
-                "class_name": model.__class__.__name__,
-                "config": model.get_config()
+# Ensure layers config has batch_input_shape and inputShape for TensorFlow.js
+model_config = model.get_config()
+layers = model_config.get("layers", [])
+
+if layers and layers[0].get("class_name") != "InputLayer":
+    layers.insert(0, {
+        "class_name": "InputLayer",
+        "config": {
+            "batch_input_shape": [None, 4],
+            "batchInputShape": [None, 4],
+            "inputShape": [4],
+            "dtype": "float32",
+            "sparse": False,
+            "name": "input_1"
+        }
+    })
+
+for layer_obj in layers:
+    cfg = layer_obj.get("config", {})
+    b_shape = cfg.get("batch_input_shape") or cfg.get("batch_shape")
+    if b_shape:
+        cfg["batch_input_shape"] = b_shape
+        cfg["batchInputShape"] = b_shape
+        if len(b_shape) > 1:
+            cfg["inputShape"] = list(b_shape[1:])
+
+model_json = {
+    "format": "layers-model",
+    "generatedBy": "keras v2.15.0",
+    "convertedBy": "TensorFlow.js Exporter",
+    "modelTopology": {
+        "keras_version": "2.15.0",
+        "backend": "tensorflow",
+        "model_config": {
+            "class_name": "Sequential",
+            "config": {
+                "name": "ranknet",
+                "layers": layers
             }
-        },
-        "weightsManifest": weights_manifest
-    }
+        }
+    },
+    "weightsManifest": weights_manifest
+}
 
-    with open("output/ranknet/model.json", "w", encoding="utf-8") as f:
-        json.dump(model_json, f, indent=2)
+with open("output/ranknet/model.json", "w", encoding="utf-8") as f:
+    json.dump(model_json, f, indent=2)
 
 meta = {
     "inputs":       ["z", "x_norm", "difficulty", "maxMarks_norm"],
