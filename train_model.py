@@ -3,11 +3,58 @@ import os
 import glob
 import numpy as np
 import tensorflow as tf
-import tensorflowjs as tfjs
 
 SEED = 42
 tf.random.set_seed(SEED)
 os.makedirs("output/ranknet", exist_ok=True)
+
+def save_keras_model_tfjs(model, output_dir):
+    """Exports a Keras model directly into TensorFlow.js Layers format (model.json + group1-shard1of1.bin) without requiring tensorflowjs library."""
+    os.makedirs(output_dir, exist_ok=True)
+    weights_manifest = []
+    weight_specs = []
+    bin_bytes = bytearray()
+
+    for layer in model.layers:
+        for weight in layer.weights:
+            w_name = weight.name
+            if w_name.endswith(":0"):
+                w_name = w_name[:-2]
+            w_arr = weight.numpy()
+            weight_specs.append({
+                "name": w_name,
+                "shape": list(w_arr.shape),
+                "dtype": "float32"
+            })
+            bin_bytes.extend(w_arr.astype("<f4").tobytes())
+
+    shard_filename = "group1-shard1of1.bin"
+    weights_manifest.append({
+        "paths": [shard_filename],
+        "weights": weight_specs
+    })
+
+    with open(os.path.join(output_dir, shard_filename), "wb") as f:
+        f.write(bin_bytes)
+
+    keras_version = getattr(tf.keras, "__version__", "2.15.0")
+    model_json = {
+        "format": "layers-model",
+        "generatedBy": f"keras v{keras_version}",
+        "convertedBy": "TensorFlow.js Exporter",
+        "modelTopology": {
+            "keras_version": keras_version,
+            "backend": "tensorflow",
+            "model_config": {
+                "class_name": model.__class__.__name__,
+                "config": model.get_config()
+            }
+        },
+        "weightsManifest": weights_manifest
+    }
+
+    with open(os.path.join(output_dir, "model.json"), "w", encoding="utf-8") as f:
+        json.dump(model_json, f, indent=2)
 
 # ── Fitted statistical constants ──────────────────────────────────────────────
 
@@ -208,7 +255,7 @@ print(f"Worst — z:{X[worst,0]:.3f} x:{X[worst,1]:.3f} diff:{X[worst,2]:.3f} ac
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 
-tfjs.converters.save_keras_model(model, "output/ranknet")
+save_keras_model_tfjs(model, "output/ranknet")
 
 meta = {
     "inputs":       ["z", "x_norm", "difficulty", "maxMarks_norm"],
