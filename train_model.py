@@ -90,8 +90,10 @@ print(f"N lookup built for {len(n_lookup)} tests | avg N: {avg_N:.0f}")
 
 points = []
 
-# Leaderboard points
+# Index lb_tests by testName for O(1) lookup speed
 lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
+lb_by_name = {t.get("testName"): t for t in lb_tests if t.get("testName")}
+
 for test in lb_tests:
     name   = test.get("testName")
     avg    = test.get("avg") or avg_lookup.get(name)
@@ -141,7 +143,7 @@ for sf in student_files:
         maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
         if not maxMarks:                                           continue
 
-        lb = next((l for l in lb_tests if l.get("testName") == name), None)
+        lb = lb_by_name.get(name)
         if not lb or not (lb.get("avg") or avg_lookup.get(name)) or not (lb.get("topper") or topper_lookup.get(name)):
             continue
 
@@ -172,7 +174,7 @@ print(f"difficulty range: {X[:,2].min():.3f} → {X[:,2].max():.3f}")
 print(f"maxMarks range:   {X[:,3].min():.3f} → {X[:,3].max():.3f}")
 print(f"y range:          {(Y.min()*100):.1f}% → {(Y.max()*100):.1f}%")
 
-# ── Model ─────────────────────────────────────────────────────────────────────
+# ── Model & Optimized Training ────────────────────────────────────────────────
 
 model = tf.keras.Sequential([
     tf.keras.layers.Input(shape=(4,)),
@@ -183,12 +185,35 @@ model = tf.keras.Sequential([
 ], name="ranknet")
 
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-3),
+    optimizer=tf.keras.optimizers.Adam(learning_rate=2e-3),
     loss="mse",
     metrics=["mae"]
 )
 
-model.fit(X, Y, epochs=2500, batch_size=32, verbose=0)
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(
+        monitor="loss",
+        patience=60,
+        restore_best_weights=True,
+        min_delta=1e-5
+    ),
+    tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="loss",
+        factor=0.5,
+        patience=25,
+        min_lr=1e-5
+    )
+]
+
+print("\nTraining RankNet with adaptive learning rate and early stopping...")
+history = model.fit(
+    X, Y,
+    epochs=1200,
+    batch_size=64,
+    callbacks=callbacks,
+    verbose=0
+)
+print(f"Training completed in {len(history.history['loss'])} epochs (converged loss: {history.history['loss'][-1]:.6f})")
 
 # ── Evaluate ──────────────────────────────────────────────────────────────────
 
@@ -210,7 +235,8 @@ weight_specs = []
 bin_bytes = bytearray()
 for layer in model.layers:
     for w in layer.weights:
-        w_name = w.name.split(":")[0]
+        base_name = w.name.split(":")[0]
+        w_name = f"{layer.name}/{base_name}" if "/" not in base_name else base_name
         arr = w.numpy()
         weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
         bin_bytes.extend(arr.astype("<f4").tobytes())
@@ -221,7 +247,7 @@ weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
 with open(f"output/ranknet/{shard_name}", "wb") as f:
     f.write(bin_bytes)
 
-# Ensure layers config has batch_input_shape and inputShape for TensorFlow.js
+# Ensure InputLayer config has ONLY batch_input_shape (not both inputShape and batchInputShape)
 model_config = model.get_config()
 layers = model_config.get("layers", [])
 
@@ -230,8 +256,6 @@ if layers and layers[0].get("class_name") != "InputLayer":
         "class_name": "InputLayer",
         "config": {
             "batch_input_shape": [None, 4],
-            "batchInputShape": [None, 4],
-            "inputShape": [4],
             "dtype": "float32",
             "sparse": False,
             "name": "input_1"
@@ -240,12 +264,13 @@ if layers and layers[0].get("class_name") != "InputLayer":
 
 for layer_obj in layers:
     cfg = layer_obj.get("config", {})
-    b_shape = cfg.get("batch_input_shape") or cfg.get("batch_shape")
-    if b_shape:
+    if layer_obj.get("class_name") == "InputLayer":
+        b_shape = cfg.get("batch_input_shape") or cfg.get("batch_shape") or [None, 4]
+        cfg.clear()
         cfg["batch_input_shape"] = b_shape
-        cfg["batchInputShape"] = b_shape
-        if len(b_shape) > 1:
-            cfg["inputShape"] = list(b_shape[1:])
+        cfg["dtype"] = "float32"
+        cfg["sparse"] = False
+        cfg["name"] = "input_1"
 
 model_json = {
     "format": "layers-model",
@@ -278,6 +303,12 @@ meta = {
         "intercept_tgn": INTERCEPT_TGN,
         "slope_k":       SLOPE_K,
         "intercept_k":   INTERCEPT_K
+    },
+    "evaluation": {
+        "mae_percentile_pts": float(np.round(errors.mean(), 2)),
+        "max_error_pts":      float(np.round(errors.max(), 2)),
+        "within_3pts":        float(np.round((errors < 3).mean() * 100, 1)),
+        "within_5pts":        float(np.round((errors < 5).mean() * 100, 1))
     }
 }
 
