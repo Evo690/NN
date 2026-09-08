@@ -34,6 +34,27 @@ def normalize_input(score, avg, maxMarks):
     maxMarks_norm = maxMarks / 300.0
     return z, x_norm, difficulty, maxMarks_norm
 
+# ── Filter for JEE-only tests (exclude NEET 720m, N-ASAT, NTSC, junior tests) ─
+
+def is_valid_jee_test(name, maxMarks=None):
+    if not name:
+        return False
+    nl = name.lower()
+    # Exclude Medical (NEET) tests
+    if "neet" in nl:
+        return False
+    # Exclude Admission / Scholarship tests (N-ASAT, ASAT, NTSC)
+    if "asat" in nl or "n-asat" in nl or "ntsc" in nl:
+        return False
+    # Exclude junior foundation / non-JEE tests (Class 8, 9, 10, SST, Olympiads)
+    if any(k in nl for k in ["class 8", "class 9", "class 10", "class-8", "class-9", "class-10", "class 08", "class 09", "sst", "ioqm"]):
+        return False
+    # Standard JEE marks range: typically 120 <= maxMarks <= 396 (Mains 300; Adv 180, 186, 198, 360)
+    if maxMarks is not None:
+        if maxMarks < 120 or maxMarks > 396:
+            return False
+    return True
+
 # ── Load data ─────────────────────────────────────────────────────────────────
 
 LB_PATH = "data/lb.json"
@@ -47,7 +68,7 @@ student_files = [
 print(f"Leaderboard: {LB_PATH}")
 print(f"Student files ({len(student_files)}): {[os.path.basename(f) for f in student_files]}")
 
-# ── N lookup & test metadata lookup ───────────────────────────────────────────
+# ── N lookup & test metadata lookup (JEE Only) ────────────────────────────────
 
 n_lookup = {}
 max_marks_lookup = {}
@@ -66,8 +87,12 @@ for sf in student_files:
         if not name:
             continue
 
-        if test.get("maxMarks") and name not in max_marks_lookup:
-            max_marks_lookup[name] = test["maxMarks"]
+        mm = test.get("maxMarks")
+        if not is_valid_jee_test(name, mm):
+            continue
+
+        if mm and name not in max_marks_lookup:
+            max_marks_lookup[name] = mm
         if test.get("avg") and name not in avg_lookup:
             avg_lookup[name] = test["avg"]
         if test.get("topper") and name not in topper_lookup:
@@ -99,9 +124,13 @@ lb_by_name = {t.get("testName"): t for t in lb_tests if t.get("testName")}
 
 seen_keys = set()
 
-# Process Leaderboard points from lb.json
+# Process Leaderboard points from lb.json (JEE only)
 for test in lb_tests:
-    name   = test.get("testName")
+    name     = test.get("testName")
+    maxMarks = max_marks_lookup.get(name) or test.get("maxMarks")
+    if not is_valid_jee_test(name, maxMarks):
+        continue
+
     avg    = test.get("avg") or avg_lookup.get(name)
     topper = test.get("topper") or topper_lookup.get(name)
     lb     = test.get("leaderboard", [])
@@ -137,9 +166,9 @@ for test in lb_tests:
         point_ranks.append(rank)
 
 lb_count = len(points)
-print(f"Unique Leaderboard points: {lb_count}")
+print(f"Unique JEE Leaderboard points: {lb_count}")
 
-# Process ALL student and converted dataset files in data/
+# Process ALL student and converted dataset files in data/ (JEE only)
 for sf in student_files:
     with open(sf, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -148,16 +177,17 @@ for sf in student_files:
         continue
 
     for test in data:
+        name = test.get("testName")
+        if not name: continue
+        maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
+        if not is_valid_jee_test(name, maxMarks):
+            continue
+
         score = test.get("score")
         rank  = test.get("rank")
         pct   = test.get("percentile")
         if score is None or score <= 0 or rank is None or rank <= 0:
             continue
-
-        name     = test.get("testName")
-        if not name: continue
-        maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
-        if not maxMarks or maxMarks <= 0: continue
 
         # Extract avg & topper from record itself, lb_tests, or global lookups
         lb = lb_by_name.get(name)
