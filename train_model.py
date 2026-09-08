@@ -83,7 +83,9 @@ with open(LB_PATH, "r", encoding="utf-8") as f:
 
 student_files = [
     f for f in glob.glob("data/*.json")
-    if os.path.basename(f).lower() != "lb.json" and "checkthis" not in os.path.basename(f).lower()
+    if os.path.basename(f).lower() != "lb.json"
+    and "checkthis" not in os.path.basename(f).lower()
+    and "master" not in os.path.basename(f).lower()
 ]
 print(f"Leaderboard: {LB_PATH}")
 print(f"Student files ({len(student_files)}): {[os.path.basename(f) for f in student_files]}")
@@ -395,29 +397,123 @@ print("Model B training complete!")
 
 # ── Comparative Benchmark on Institute Data ───────────────────────────────────
 
-print("\n" + "="*70)
-print("         HEAD-TO-HEAD BENCHMARK: EVALUATING BOTH ON INSTITUTE DATA      ")
-print("="*70)
+# ── Model Evaluation Helper ───────────────────────────────────────────────────
+
+def print_detailed_model_stats(model_label, preds, targets, test_names, X):
+    errors = np.abs(preds - targets) * 100
+    mae = float(np.mean(errors))
+    median = float(np.median(errors))
+    rmse = float(np.sqrt(np.mean(errors**2)))
+    max_err = float(np.max(errors))
+    w1 = float((errors < 1.0).mean() * 100)
+    w3 = float((errors < 3.0).mean() * 100)
+    w5 = float((errors < 5.0).mean() * 100)
+
+    unique_tests = np.unique(test_names)
+    test_stats = []
+    for t in unique_tests:
+        m = (test_names == t)
+        t_errs = errors[m]
+        test_stats.append({
+            "name": t,
+            "samples": int(np.sum(m)),
+            "mae": float(np.mean(t_errs)),
+            "max": float(np.max(t_errs)),
+            "w3": float((t_errs < 3.0).mean() * 100)
+        })
+
+    test_stats_by_mae = sorted(test_stats, key=lambda x: x["mae"])
+    best_test = test_stats_by_mae[0]
+    worst_test = test_stats_by_mae[-1]
+
+    test_stats_by_peak = sorted(test_stats, key=lambda x: x["max"], reverse=True)
+    peak_test = test_stats_by_peak[0]
+
+    worst_idx = int(np.argmax(errors))
+
+    print("\n" + "=" * 78)
+    print(f"             DETAILED PERFORMANCE STATS: {model_label.upper()}             ")
+    print("=" * 78)
+    print(f"Total Unique Tests Evaluated: {len(unique_tests)} | Total Test Samples: {len(targets)}")
+    print(f"  * Average Error (MAE) : {mae:.2f} percentile pts")
+    print(f"  * Median Absolute Err : {median:.2f} percentile pts")
+    print(f"  * Root Mean Sq Error  : {rmse:.2f} percentile pts")
+    print(f"  * Max Peak Error      : {max_err:.2f} percentile pts")
+    print(f"  * Within +/-1.0 pts   : {w1:.1f}%")
+    print(f"  * Within +/-3.0 pts   : {w3:.1f}%")
+    print(f"  * Within +/-5.0 pts   : {w5:.1f}%")
+
+    print(f"\n★ BEST PREDICTED TEST (Lowest MAE):")
+    print(f"  '{best_test['name']}'")
+    print(f"  MAE: {best_test['mae']:.2f} pts | Max: {best_test['max']:.2f} pts | Within +/-3pts: {best_test['w3']:.1f}% ({best_test['samples']} samples)")
+
+    print(f"\n▲ WORST PREDICTED TEST (Highest MAE):")
+    print(f"  '{worst_test['name']}'")
+    print(f"  MAE: {worst_test['mae']:.2f} pts | Max: {worst_test['max']:.2f} pts | Within +/-3pts: {worst_test['w3']:.1f}% ({worst_test['samples']} samples)")
+
+    print(f"\n▲ TEST WITH HIGHEST PEAK ERROR:")
+    print(f"  '{peak_test['name']}'")
+    print(f"  Peak Error: {peak_test['max']:.2f} pts | MAE: {peak_test['mae']:.2f} pts ({peak_test['samples']} samples)")
+
+    print("\n" + "-" * 78)
+    print(f"{'TEST NAME':<46} | {'SAMPLES':<7} | {'MAE':<6} | {'MAX ERR':<7} | {'+/-3PTS'}")
+    print("-" * 78)
+    print("Top 3 Best Predicted Tests:")
+    for t in test_stats_by_mae[:3]:
+        t_display = t['name'][:44]
+        print(f"  {t_display:<44} | {t['samples']:<7} | {t['mae']:<6.2f} | {t['max']:<7.2f} | {t['w3']:<5.1f}%")
+
+    print("\nTop 3 Worst Predicted Tests:")
+    for t in test_stats_by_mae[-3:][::-1]:
+        t_display = t['name'][:44]
+        print(f"  {t_display:<44} | {t['samples']:<7} | {t['mae']:<6.2f} | {t['max']:<7.2f} | {t['w3']:<5.1f}%")
+    print("-" * 78)
+
+    print(f"\nWorst Individual Prediction Sample:")
+    print(f"  Test: {test_names[worst_idx]}")
+    print(f"  Inputs: z={X[worst_idx,0]:.3f}, x_norm={X[worst_idx,1]:.3f}, diff={X[worst_idx,2]:.3f}, maxMarks_norm={X[worst_idx,3]:.3f}")
+    print(f"  Actual: {targets[worst_idx]*100:.2f}% | Predicted: {preds[worst_idx]*100:.2f}% | Error: {errors[worst_idx]:.2f} pts")
+    print("=" * 78)
+
+    return {
+        "mae": round(mae, 2),
+        "median": round(median, 2),
+        "rmse": round(rmse, 2),
+        "max": round(max_err, 2),
+        "w1": round(w1, 1),
+        "w3": round(w3, 1),
+        "w5": round(w5, 1),
+        "test_stats": test_stats
+    }
+
+# ── Evaluate Both Models On Institute Test Data ──────────────────────────────
 
 preds_a = model_a.predict(X_inst, verbose=0).flatten()
 preds_b = model_b.predict(X_inst, verbose=0).flatten()
 
+stats_a = print_detailed_model_stats("Model A (OG Institute Data)", preds_a, Y_inst, point_test_names, X_inst)
+stats_b = print_detailed_model_stats("Model B (OG Data + Checkthis)", preds_b, Y_inst, point_test_names, X_inst)
+
+# ── Head-to-Head Comparative Benchmark ────────────────────────────────────────
+
 err_a = np.abs(preds_a - Y_inst) * 100
 err_b = np.abs(preds_b - Y_inst) * 100
 
-mae_a, mae_b = float(np.mean(err_a)), float(np.mean(err_b))
-med_a, med_b = float(np.median(err_a)), float(np.median(err_b))
-rmse_a, rmse_b = float(np.sqrt(np.mean(err_a**2))), float(np.sqrt(np.mean(err_b**2)))
-max_a, max_b = float(np.max(err_a)), float(np.max(err_b))
-
-w1_a, w1_b = float((err_a < 1.0).mean() * 100), float((err_b < 1.0).mean() * 100)
-w3_a, w3_b = float((err_a < 3.0).mean() * 100), float((err_b < 3.0).mean() * 100)
-w5_a, w5_b = float((err_a < 5.0).mean() * 100), float((err_b < 5.0).mean() * 100)
+mae_a, mae_b = stats_a["mae"], stats_b["mae"]
+med_a, med_b = stats_a["median"], stats_b["median"]
+rmse_a, rmse_b = stats_a["rmse"], stats_b["rmse"]
+max_a, max_b = stats_a["max"], stats_b["max"]
+w1_a, w1_b = stats_a["w1"], stats_b["w1"]
+w3_a, w3_b = stats_a["w3"], stats_b["w3"]
+w5_a, w5_b = stats_a["w5"], stats_b["w5"]
 
 winner_mae = "MODEL A (Institute)" if mae_a < mae_b else "MODEL B (Combined)"
 winner_rmse = "MODEL A (Institute)" if rmse_a < rmse_b else "MODEL B (Combined)"
 winner_max = "MODEL A (Institute)" if max_a < max_b else "MODEL B (Combined)"
 
+print("\n" + "=" * 85)
+print("         HEAD-TO-HEAD BENCHMARK: EVALUATING BOTH ON INSTITUTE DATA      ")
+print("=" * 85)
 print(f"{'METRIC':<26} | {'MODEL A (INSTITUTE ONLY)':<25} | {'MODEL B (COMBINED)':<20} | {'BETTER'}")
 print("-" * 85)
 print(f"{'Average Error (MAE)':<26} | {mae_a:<25.2f} | {mae_b:<20.2f} | {winner_mae}")
