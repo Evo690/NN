@@ -97,6 +97,9 @@ point_ranks = []
 lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
 lb_by_name = {t.get("testName"): t for t in lb_tests if t.get("testName")}
 
+seen_keys = set()
+
+# Process Leaderboard points from lb.json
 for test in lb_tests:
     name   = test.get("testName")
     avg    = test.get("avg") or avg_lookup.get(name)
@@ -116,7 +119,7 @@ for test in lb_tests:
     for entry in lb:
         score = entry.get("score") if entry.get("score") is not None else entry.get("totalMarks")
         rank  = entry.get("rank") if entry.get("rank") is not None else entry.get("ranks")
-        if score is None or rank is None:  continue
+        if score is None or rank is None or score <= 0 or rank <= 0: continue
 
         y = 1.0 - (rank / N)
         if not (0 < y < 1.0):             continue
@@ -124,15 +127,19 @@ for test in lb_tests:
         z, x_norm, difficulty, maxMarks_norm = normalize_input(score, avg, maxMarks)
         if x_norm <= 0:                    continue
 
+        key = (name, round(float(score), 1), int(rank))
+        if key in seen_keys: continue
+        seen_keys.add(key)
+
         points.append([z, x_norm, difficulty, maxMarks_norm, y])
         point_test_names.append(name)
         point_scores.append(score)
         point_ranks.append(rank)
 
 lb_count = len(points)
-print(f"Leaderboard points: {lb_count}")
+print(f"Unique Leaderboard points: {lb_count}")
 
-# Student personal points
+# Process ALL student and converted dataset files in data/
 for sf in student_files:
     with open(sf, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -141,37 +148,53 @@ for sf in student_files:
         continue
 
     for test in data:
-        if not test.get("score")      or test["score"] == 0:      continue
-        if not test.get("rank")       or test["rank"] == 0:       continue
-        if not test.get("percentile") or test["percentile"] == 0: continue
-
-        name     = test.get("testName")
-        maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
-        if not maxMarks:                                           continue
-
-        lb = lb_by_name.get(name)
-        if not lb or not (lb.get("avg") or avg_lookup.get(name)) or not (lb.get("topper") or topper_lookup.get(name)):
+        score = test.get("score")
+        rank  = test.get("rank")
+        pct   = test.get("percentile")
+        if score is None or score <= 0 or rank is None or rank <= 0:
             continue
 
-        avg    = lb.get("avg") or avg_lookup.get(name)
-        topper = lb.get("topper") or topper_lookup.get(name)
+        name     = test.get("testName")
+        if not name: continue
+        maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
+        if not maxMarks or maxMarks <= 0: continue
+
+        # Extract avg & topper from record itself, lb_tests, or global lookups
+        lb = lb_by_name.get(name)
+        avg = test.get("avg") or (lb.get("avg") if lb else None) or avg_lookup.get(name)
+        topper = test.get("topper") or (lb.get("topper") if lb else None) or topper_lookup.get(name)
+        if not avg or not topper or topper <= avg:
+            continue
+
+        # Determine N from lookup or directly from percentile
         n_vals = n_lookup.get(name)
-        if not n_vals or topper <= avg:                            continue
-        N      = float(np.mean(n_vals))
+        if n_vals:
+            N = float(np.mean(n_vals))
+        elif pct and 0 < pct < 100:
+            N = float(rank) / (1.0 - float(pct) / 100.0)
+        else:
+            continue
 
-        y = 1.0 - (test["rank"] / N)
-        if not (0 < y < 1.0):                                     continue
+        y = 1.0 - (rank / N)
+        if not (0 < y < 1.0):
+            continue
 
-        z, x_norm, difficulty, maxMarks_norm = normalize_input(test["score"], avg, maxMarks)
-        if x_norm <= 0:                                            continue
+        z, x_norm, difficulty, maxMarks_norm = normalize_input(score, avg, maxMarks)
+        if x_norm <= 0:
+            continue
+
+        key = (name, round(float(score), 1), int(rank))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
 
         points.append([z, x_norm, difficulty, maxMarks_norm, y])
         point_test_names.append(name)
-        point_scores.append(test["score"])
-        point_ranks.append(test["rank"])
+        point_scores.append(score)
+        point_ranks.append(rank)
 
-print(f"Student personal points: {len(points) - lb_count}")
-print(f"Total training points: {len(points)}")
+print(f"Additional unique points from all data/*.json files: {len(points) - lb_count}")
+print(f"Total deduplicated training points: {len(points)}")
 
 points = np.array(points, dtype=np.float32)
 point_test_names = np.array(point_test_names)
