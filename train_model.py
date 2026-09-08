@@ -38,37 +38,57 @@ def normalize_input(score, avg, maxMarks):
 
 # ── Filter for Standard JEE tests ─────────────────────────────────────────────
 
+# ── Whitelist: ITs and NTs in the NEW Leaderboard (skipping IT 1-3 of 2025) ──
+# User rule: Take only ITs and NTs of new leaderboard (skip IT 1-3 of 2025).
+# Use data from master leaderboard and other files ONLY and only for these whitelisted tests.
+LB_PATH = "data/lb.json"
+with open(LB_PATH, "r", encoding="utf-8") as f:
+    lb_data = json.load(f)
+
+def is_it_1_to_3_of_2025(name):
+    nl = name.lower()
+    if any(k in nl for k in ["27-apr-25", "27-april-25", "spn & a0s", "spn,a0s"]):
+        return True
+    if ("25" in nl or "2025" in nl) and re.search(r"(?:internal\s*test|it)[\s\-_]*0?[123](?:[^\d]|$)", nl):
+        return True
+    return False
+
+lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
+VALID_LEADERBOARD_TESTS = set()
+
+for t in lb_tests:
+    tname = (t.get("testName") or "").strip()
+    if not tname:
+        continue
+    nl = tname.lower()
+    if "neet" in nl:
+        continue
+    # Must be Internal Test (IT) or National Test (NT)
+    if not any(k in nl for k in ["internal test", "national test", "it-", "nt-", "it ", "nt "]):
+        continue
+    # Skip IT 1-3 of 2025
+    if is_it_1_to_3_of_2025(tname):
+        continue
+    VALID_LEADERBOARD_TESTS.add(tname)
+
+print(f"\n[New Leaderboard Whitelist: ITs and NTs (excluding 2025 IT 1-3)] Active Tests: {len(VALID_LEADERBOARD_TESTS)}")
+for idx, t in enumerate(sorted(VALID_LEADERBOARD_TESTS), 1):
+    print(f"  {idx:2d}. {t}")
+
 def is_valid_jee_test(name, maxMarks=None):
     if not name:
         return False
-    nl = name.strip().lower()
+    name_clean = name.strip()
 
-    # 1. Exclude Medical (NEET) tests
-    if "neet" in nl:
+    # 1. Rule: Take ONLY tests present in the NEW Leaderboard IT/NT whitelist
+    if name_clean not in VALID_LEADERBOARD_TESTS:
         return False
 
-    # 2. Exclude Admission / Scholarship tests (N-ASAT, ASAT, NTSC)
-    if "asat" in nl or "ntsc" in nl:
+    # 2. Exclude Medical (NEET) tests if any
+    if "neet" in name_clean.lower():
         return False
 
-    # 3. Exclude Olympiads (NSEP, NSEC, NSEA, IOQM, etc.)
-    if any(k in nl for k in ["nsep", "nsec", "nsea", "inpho", "incho", "ioqm", "olympiad"]):
-        return False
-
-    # 4. Exclude junior foundation tests (Class 8, 9, 10, IX, X, SST)
-    if any(k in nl for k in ["class 8", "class 9", "class 10", "class-8", "class-9", "class-10", "class 08", "class 09", "sst", "class ix", "_ix", " ix "]):
-        return False
-
-    # 5. Exclude Alpha & Beta drill tests (skewed extreme curves)
-    if "alpha" in nl or "beta" in nl:
-        return False
-
-    # 6. Exclude early 2025 tests (IT 1 to IT 3 from 2025 with wrong/glitchy percentile data)
-    if ("25" in nl or "2025" in nl):
-        if re.search(r"(?:it|test)[\s\-_]*0?[123](?:[^\d]|$)", nl):
-            return False
-
-    # 7. Standard JEE marks range: 120 <= maxMarks <= 396 (Mains 300; Adv 180, 186, 198, 360)
+    # 3. Standard JEE marks range: 120 <= maxMarks <= 396 (Mains 300; Adv 180, 186, 198, 360)
     if maxMarks is not None:
         if maxMarks < 120 or maxMarks > 396:
             return False
@@ -77,15 +97,11 @@ def is_valid_jee_test(name, maxMarks=None):
 
 # ── Load Institute Data ───────────────────────────────────────────────────────
 
-LB_PATH = "data/lb.json"
-with open(LB_PATH, "r", encoding="utf-8") as f:
-    lb_data = json.load(f)
-
+# Ingest all student files and master leaderboard ONLY for tests in the whitelist
 student_files = [
     f for f in glob.glob("data/*.json")
     if os.path.basename(f).lower() != "lb.json"
     and "checkthis" not in os.path.basename(f).lower()
-    and "master" not in os.path.basename(f).lower()
 ]
 print(f"Leaderboard: {LB_PATH}")
 print(f"Student files ({len(student_files)}): {[os.path.basename(f) for f in student_files]}")
@@ -104,7 +120,7 @@ for sf in student_files:
         continue
 
     for test in data:
-        name = test.get("testName")
+        name = (test.get("testName") or "").strip()
         if not name:
             continue
 
@@ -139,13 +155,13 @@ point_scores = []
 point_ranks = []
 
 lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
-lb_by_name = {t.get("testName"): t for t in lb_tests if t.get("testName")}
+lb_by_name = {t.get("testName").strip(): t for t in lb_tests if t.get("testName")}
 
 seen_keys = set()
 
 # Process Leaderboard points from lb.json (JEE only)
 for test in lb_tests:
-    name     = test.get("testName")
+    name     = (test.get("testName") or "").strip()
     maxMarks = max_marks_lookup.get(name) or test.get("maxMarks")
     if not is_valid_jee_test(name, maxMarks):
         continue
@@ -196,7 +212,7 @@ for sf in student_files:
         continue
 
     for test in data:
-        name = test.get("testName")
+        name = (test.get("testName") or "").strip()
         if not name: continue
         maxMarks = test.get("maxMarks") or max_marks_lookup.get(name)
         if not is_valid_jee_test(name, maxMarks):
@@ -245,10 +261,29 @@ point_test_names = np.array(point_test_names)
 point_scores = np.array(point_scores)
 point_ranks = np.array(point_ranks)
 
+# ── Filter Out Low-Sample Tests (< 10 samples) ────────────────────────────────
+from collections import Counter
+test_counts = Counter(point_test_names)
+valid_test_names = {t for t, cnt in test_counts.items() if cnt >= 10}
+low_sample_tests = {t: cnt for t, cnt in test_counts.items() if cnt < 10}
+
+if low_sample_tests:
+    print(f"\n[Filtering Low-Sample Tests (< 10 samples)] Excluded {len(low_sample_tests)} random/skewed tests:")
+    for t, cnt in sorted(low_sample_tests.items(), key=lambda x: x[1]):
+        print(f"  - Excluded '{t}' ({cnt} samples)")
+
+filtered_indices = [i for i, t in enumerate(point_test_names) if t in valid_test_names]
+points = points[filtered_indices]
+point_test_names = point_test_names[filtered_indices]
+point_scores = point_scores[filtered_indices]
+point_ranks = point_ranks[filtered_indices]
+
 X_inst = points[:, :4]
 Y_inst = points[:, 4]
 
-print(f"Total Institute JEE training points: {len(X_inst)} across {len(np.unique(point_test_names))} tests")
+print(f"\nTotal Clean New Leaderboard JEE training points: {len(X_inst)} across {len(np.unique(point_test_names))} verified tests:")
+for t, cnt in Counter(point_test_names).most_common():
+    print(f"  * {t}: {cnt} samples")
 
 # ── Process checkthis.csv (Filter: Score >= 100, remove suspicious accounts) ──
 
