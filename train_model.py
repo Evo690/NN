@@ -1,8 +1,10 @@
-import json, os, glob
+import json, os, glob, re, csv
 import numpy as np
 import tensorflow as tf
 
 os.makedirs("output/ranknet", exist_ok=True)
+os.makedirs("output/ranknet_institute", exist_ok=True)
+os.makedirs("output/ranknet_combined", exist_ok=True)
 
 # ── Fitted statistical constants ──────────────────────────────────────────────
 
@@ -34,28 +36,46 @@ def normalize_input(score, avg, maxMarks):
     maxMarks_norm = maxMarks / 300.0
     return z, x_norm, difficulty, maxMarks_norm
 
-# ── Filter for JEE-only tests (exclude NEET 720m, N-ASAT, NTSC, junior tests) ─
+# ── Filter for Standard JEE tests ─────────────────────────────────────────────
 
 def is_valid_jee_test(name, maxMarks=None):
     if not name:
         return False
-    nl = name.lower()
-    # Exclude Medical (NEET) tests
+    nl = name.strip().lower()
+
+    # 1. Exclude Medical (NEET) tests
     if "neet" in nl:
         return False
-    # Exclude Admission / Scholarship tests (N-ASAT, ASAT, NTSC)
-    if "asat" in nl or "n-asat" in nl or "ntsc" in nl:
+
+    # 2. Exclude Admission / Scholarship tests (N-ASAT, ASAT, NTSC)
+    if "asat" in nl or "ntsc" in nl:
         return False
-    # Exclude junior foundation / non-JEE tests (Class 8, 9, 10, SST, Olympiads)
-    if any(k in nl for k in ["class 8", "class 9", "class 10", "class-8", "class-9", "class-10", "class 08", "class 09", "sst", "ioqm"]):
+
+    # 3. Exclude Olympiads (NSEP, NSEC, NSEA, IOQM, etc.)
+    if any(k in nl for k in ["nsep", "nsec", "nsea", "inpho", "incho", "ioqm", "olympiad"]):
         return False
-    # Standard JEE marks range: typically 120 <= maxMarks <= 396 (Mains 300; Adv 180, 186, 198, 360)
+
+    # 4. Exclude junior foundation tests (Class 8, 9, 10, IX, X, SST)
+    if any(k in nl for k in ["class 8", "class 9", "class 10", "class-8", "class-9", "class-10", "class 08", "class 09", "sst", "class ix", "_ix", " ix "]):
+        return False
+
+    # 5. Exclude Alpha & Beta drill tests (skewed extreme curves)
+    if "alpha" in nl or "beta" in nl:
+        return False
+
+    # 6. Exclude early 2025 tests (IT 1 to IT 3 from 2025 with wrong/glitchy percentile data)
+    if ("25" in nl or "2025" in nl):
+        if re.search(r"(?:it|test)[\s\-_]*0?[123](?:[^\d]|$)", nl):
+            return False
+
+    # 7. Standard JEE marks range: 120 <= maxMarks <= 396 (Mains 300; Adv 180, 186, 198, 360)
     if maxMarks is not None:
         if maxMarks < 120 or maxMarks > 396:
             return False
+
     return True
 
-# ── Load data ─────────────────────────────────────────────────────────────────
+# ── Load Institute Data ───────────────────────────────────────────────────────
 
 LB_PATH = "data/lb.json"
 with open(LB_PATH, "r", encoding="utf-8") as f:
@@ -63,13 +83,12 @@ with open(LB_PATH, "r", encoding="utf-8") as f:
 
 student_files = [
     f for f in glob.glob("data/*.json")
-    if os.path.basename(f).lower() != "lb.json"
+    if os.path.basename(f).lower() != "lb.json" and "checkthis" not in os.path.basename(f).lower()
 ]
 print(f"Leaderboard: {LB_PATH}")
 print(f"Student files ({len(student_files)}): {[os.path.basename(f) for f in student_files]}")
 
-# ── N lookup & test metadata lookup (JEE Only) ────────────────────────────────
-
+# N lookup & test metadata lookup (JEE Only)
 n_lookup = {}
 max_marks_lookup = {}
 avg_lookup = {}
@@ -109,16 +128,14 @@ for sf in student_files:
         n_lookup[name].append(N)
 
 avg_N = float(np.mean([np.mean(vals) for vals in n_lookup.values()])) if n_lookup else 500.0
-print(f"N lookup built for {len(n_lookup)} tests | avg N: {avg_N:.0f}")
+print(f"N lookup built for {len(n_lookup)} JEE tests | avg N: {avg_N:.0f}")
 
-# ── Build training points ─────────────────────────────────────────────────────
-
+# Build Institute training points
 points = []
 point_test_names = []
 point_scores = []
 point_ranks = []
 
-# Index lb_tests for O(1) lookup
 lb_tests = lb_data.get("tests", []) if isinstance(lb_data, dict) else lb_data
 lb_by_name = {t.get("testName"): t for t in lb_tests if t.get("testName")}
 
@@ -189,14 +206,12 @@ for sf in student_files:
         if score is None or score <= 0 or rank is None or rank <= 0:
             continue
 
-        # Extract avg & topper from record itself, lb_tests, or global lookups
         lb = lb_by_name.get(name)
         avg = test.get("avg") or (lb.get("avg") if lb else None) or avg_lookup.get(name)
         topper = test.get("topper") or (lb.get("topper") if lb else None) or topper_lookup.get(name)
         if not avg or not topper or topper <= avg:
             continue
 
-        # Determine N from lookup or directly from percentile
         n_vals = n_lookup.get(name)
         if n_vals:
             N = float(np.mean(n_vals))
@@ -223,239 +238,345 @@ for sf in student_files:
         point_scores.append(score)
         point_ranks.append(rank)
 
-print(f"Additional unique points from all data/*.json files: {len(points) - lb_count}")
-print(f"Total deduplicated training points: {len(points)}")
-
 points = np.array(points, dtype=np.float32)
 point_test_names = np.array(point_test_names)
 point_scores = np.array(point_scores)
 point_ranks = np.array(point_ranks)
 
-X = points[:, :4]
-Y = points[:, 4]
+X_inst = points[:, :4]
+Y_inst = points[:, 4]
 
-print(f"\nz range:          {X[:,0].min():.3f} → {X[:,0].max():.3f}")
-print(f"x_norm range:     {X[:,1].min():.3f} → {X[:,1].max():.3f}")
-print(f"difficulty range: {X[:,2].min():.3f} → {X[:,2].max():.3f}")
-print(f"maxMarks range:   {X[:,3].min():.3f} → {X[:,3].max():.3f}")
-print(f"y range:          {(Y.min()*100):.1f}% → {(Y.max()*100):.1f}%")
+print(f"Total Institute JEE training points: {len(X_inst)} across {len(np.unique(point_test_names))} tests")
 
-# ── Model (Tuned for sharper tail resolution & smooth leaderboard inversion) ──
+# ── Process checkthis.csv (Filter: Score >= 100, remove suspicious accounts) ──
 
-model = tf.keras.Sequential([
-    tf.keras.layers.Input(shape=(4,)),
-    tf.keras.layers.Dense(48, activation="tanh"),
-    tf.keras.layers.Dense(32, activation="tanh"),
-    tf.keras.layers.Dense(16, activation="tanh"),
-    tf.keras.layers.Dense(1,  activation="sigmoid")
-], name="ranknet")
+checkthis_points = []
+CHECKTHIS_PATH = "checkthis.csv"
+if not os.path.exists(CHECKTHIS_PATH):
+    CHECKTHIS_PATH = os.path.join("data", "checkthis.csv")
 
-# Original training process preserved (Adam 1e-3, 2500 epochs, batch size 32)
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-3),
-    loss="mse",
-    metrics=["mae"]
-)
+if os.path.exists(CHECKTHIS_PATH):
+    candidates = []
+    all_scores = []
+    max_rank = 0
+    filter_stats = {
+        "score_lt_100": 0,
+        "score_gt_275": 0,
+        "acc_100": 0,
+        "acc_unrealistic": 0,
+        "negative_marks": 0,
+        "skipped_subject": 0,
+        "subject_skew_70pct": 0
+    }
+    with open(CHECKTHIS_PATH, "r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                s = float(row["total_marks"])
+                r = int(row["rank"])
+                all_scores.append(s)
+                if r > max_rank:
+                    max_rank = r
 
-print("\nTraining RankNet (2500 epochs, batch_size=32)...")
-model.fit(X, Y, epochs=2500, batch_size=32, verbose=0)
-print("Training complete!")
+                acc = float(row.get("accuracy", 0))
+                m_m = float(row.get("mathematics_marks", 0))
+                p_m = float(row.get("physics_marks", 0))
+                c_m = float(row.get("chemistry_marks", 0))
 
-# ── Comprehensive Evaluation & Per-Test Analytics ─────────────────────────────
+                # 1. Minimum threshold: score >= 100 (user specified)
+                if s < 100.0:
+                    filter_stats["score_lt_100"] += 1
+                    continue
+                # 2. Exclude extreme top suspected cheaters (> 275 marks)
+                if s > 275.0:
+                    filter_stats["score_gt_275"] += 1
+                    continue
+                # 3. Filter out unrealistic / leaked accuracy (100% or >= 96% when score >= 180)
+                if acc >= 100.0:
+                    filter_stats["acc_100"] += 1
+                    continue
+                if acc >= 96.0 and s >= 180.0:
+                    filter_stats["acc_unrealistic"] += 1
+                    continue
+                # 4. Filter out negative marks in any subject for 100+ scorers
+                if min(m_m, p_m, c_m) < 0:
+                    filter_stats["negative_marks"] += 1
+                    continue
+                # 5. Filter out skipped subjects (e.g. min <= 5 and max >= 50 marks)
+                if min(m_m, p_m, c_m) <= 5.0 and max(m_m, p_m, c_m) >= 50.0:
+                    filter_stats["skipped_subject"] += 1
+                    continue
+                # 6. Filter out weird subject distribution (> 70% of score from single subject)
+                if (max(m_m, p_m, c_m) / s) > 0.70:
+                    filter_stats["subject_skew_70pct"] += 1
+                    continue
 
-preds  = model.predict(X, verbose=0).flatten()
-errors = np.abs(preds - Y) * 100
+                candidates.append({"rank": r, "score": s})
+            except Exception:
+                pass
 
-overall_mae    = float(np.mean(errors))
-overall_median = float(np.median(errors))
-overall_rmse   = float(np.sqrt(np.mean(errors ** 2)))
-overall_max    = float(np.max(errors))
-worst_idx      = int(np.argmax(errors))
+    candidates.sort(key=lambda x: x["rank"])
+    ct_avg = float(np.mean(all_scores)) if all_scores else 102.66
+    ct_maxMarks = 300.0
+    ct_N = float(max_rank) if max_rank > 0 else 5358.0
 
-w_1  = float((errors < 1.0).mean() * 100)
-w_2  = float((errors < 2.0).mean() * 100)
-w_3  = float((errors < 3.0).mean() * 100)
-w_5  = float((errors < 5.0).mean() * 100)
-w_10 = float((errors < 10.0).mean() * 100)
+    print(f"\n[checkthis.csv Conversion & Filter Report]")
+    print(f"  - Total Candidates (N): {ct_N:.0f} | Exam Batch Avg: {ct_avg:.2f} | Max Marks: {ct_maxMarks:.0f}")
+    print(f"  - Excluded score < 100: {filter_stats['score_lt_100']}")
+    print(f"  - Excluded score > 275 (extreme cheaters): {filter_stats['score_gt_275']}")
+    print(f"  - Excluded 100% accuracy: {filter_stats['acc_100']}")
+    print(f"  - Excluded unrealistic accuracy (>=96% at 180+ marks): {filter_stats['acc_unrealistic']}")
+    print(f"  - Excluded negative subject marks: {filter_stats['negative_marks']}")
+    print(f"  - Excluded skipped subjects (<=5 in one, >=50 in another): {filter_stats['skipped_subject']}")
+    print(f"  - Excluded severe subject skew (>70% from 1 subject): {filter_stats['subject_skew_70pct']}")
+    print(f"  [OK] Clean Serious Candidates Remaining: {len(candidates)} (Ranks {candidates[0]['rank']} to {candidates[-1]['rank']})")
+
+    # Stratified subsampling: 150 points evenly spaced across the clean candidates
+    if len(candidates) > 150:
+        indices = np.linspace(0, len(candidates) - 1, 150, dtype=int)
+        sampled_candidates = [candidates[i] for i in indices]
+    else:
+        sampled_candidates = candidates
+
+    for item in sampled_candidates:
+        s = item["score"]
+        r = item["rank"]
+        y = 1.0 - (r / ct_N)
+        if 0 < y < 1.0:
+            z, x_norm, diff, max_norm = normalize_input(s, ct_avg, ct_maxMarks)
+            if x_norm > 0:
+                checkthis_points.append([z, x_norm, diff, max_norm, y])
+
+    print(f"[checkthis.csv] Subsampled {len(checkthis_points)} clean representative points for Model B")
+
+# Build Combined Dataset (Institute + Cleaned Checkthis)
+if checkthis_points:
+    checkthis_arr = np.array(checkthis_points, dtype=np.float32)
+    X_comb = np.vstack([X_inst, checkthis_arr[:, :4]])
+    Y_comb = np.concatenate([Y_inst, checkthis_arr[:, 4]])
+else:
+    X_comb, Y_comb = X_inst, Y_inst
+
+print(f"Dataset summary: Model A = {len(X_inst)} samples | Model B = {len(X_comb)} samples")
+
+# ── Model Factory ─────────────────────────────────────────────────────────────
+
+def build_ranknet(name):
+    m = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(4,)),
+        tf.keras.layers.Dense(48, activation="tanh"),
+        tf.keras.layers.Dense(32, activation="tanh"),
+        tf.keras.layers.Dense(16, activation="tanh"),
+        tf.keras.layers.Dense(1,  activation="sigmoid")
+    ], name=name)
+    m.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss="mse",
+        metrics=["mae"]
+    )
+    return m
+
+# ── Train Model A (Institute Data Only) ────────────────────────────────────────
 
 print("\n" + "="*70)
-print("                       OVERALL EVALUATION RESULTS                       ")
+print("TRAINING MODEL A (Baseline: Institute Data Only - 2500 epochs, batch 32)...")
 print("="*70)
-print(f"Average Error (MAE):     {overall_mae:.2f} percentile pts")
-print(f"Median Error:            {overall_median:.2f} percentile pts")
-print(f"RMSE:                    {overall_rmse:.2f} percentile pts")
-print(f"Max Absolute Error:      {overall_max:.2f} percentile pts")
-print(f"Within ±1.0 percentile:  {w_1:.1f}%")
-print(f"Within ±2.0 percentile:  {w_2:.1f}%")
-print(f"Within ±3.0 percentile:  {w_3:.1f}%")
-print(f"Within ±5.0 percentile:  {w_5:.1f}%")
-print(f"Within ±10.0 percentile: {w_10:.1f}%")
-print(f"\nSingle Worst Point: Test '{point_test_names[worst_idx]}' | Score: {point_scores[worst_idx]} | Rank: {point_ranks[worst_idx]}")
-print(f"  Actual: {Y[worst_idx]*100:.2f}% | Predicted: {preds[worst_idx]*100:.2f}% | Error: {errors[worst_idx]:.2f} pts")
+model_a = build_ranknet("ranknet_institute")
+model_a.fit(X_inst, Y_inst, epochs=2500, batch_size=32, verbose=0)
+print("Model A training complete!")
 
-# Per-Test Error Breakdown
+# ── Train Model B (Combined: Institute + Cleaned Checkthis) ───────────────────
+
+print("\n" + "="*70)
+print("TRAINING MODEL B (Combined: Institute + Checkthis - 2500 epochs, batch 32)...")
+print("="*70)
+model_b = build_ranknet("ranknet_combined")
+model_b.fit(X_comb, Y_comb, epochs=2500, batch_size=32, verbose=0)
+print("Model B training complete!")
+
+# ── Comparative Benchmark on Institute Data ───────────────────────────────────
+
+print("\n" + "="*70)
+print("         HEAD-TO-HEAD BENCHMARK: EVALUATING BOTH ON INSTITUTE DATA      ")
+print("="*70)
+
+preds_a = model_a.predict(X_inst, verbose=0).flatten()
+preds_b = model_b.predict(X_inst, verbose=0).flatten()
+
+err_a = np.abs(preds_a - Y_inst) * 100
+err_b = np.abs(preds_b - Y_inst) * 100
+
+mae_a, mae_b = float(np.mean(err_a)), float(np.mean(err_b))
+med_a, med_b = float(np.median(err_a)), float(np.median(err_b))
+rmse_a, rmse_b = float(np.sqrt(np.mean(err_a**2))), float(np.sqrt(np.mean(err_b**2)))
+max_a, max_b = float(np.max(err_a)), float(np.max(err_b))
+
+w1_a, w1_b = float((err_a < 1.0).mean() * 100), float((err_b < 1.0).mean() * 100)
+w3_a, w3_b = float((err_a < 3.0).mean() * 100), float((err_b < 3.0).mean() * 100)
+w5_a, w5_b = float((err_a < 5.0).mean() * 100), float((err_b < 5.0).mean() * 100)
+
+winner_mae = "MODEL A (Institute)" if mae_a < mae_b else "MODEL B (Combined)"
+winner_rmse = "MODEL A (Institute)" if rmse_a < rmse_b else "MODEL B (Combined)"
+winner_max = "MODEL A (Institute)" if max_a < max_b else "MODEL B (Combined)"
+
+print(f"{'METRIC':<26} | {'MODEL A (INSTITUTE ONLY)':<25} | {'MODEL B (COMBINED)':<20} | {'BETTER'}")
+print("-" * 85)
+print(f"{'Average Error (MAE)':<26} | {mae_a:<25.2f} | {mae_b:<20.2f} | {winner_mae}")
+print(f"{'Median Error':<26} | {med_a:<25.2f} | {med_b:<20.2f} | {'MODEL A' if med_a < med_b else 'MODEL B'}")
+print(f"{'RMSE':<26} | {rmse_a:<25.2f} | {rmse_b:<20.2f} | {winner_rmse}")
+print(f"{'Max Absolute Error':<26} | {max_a:<25.2f} | {max_b:<20.2f} | {winner_max}")
+print(f"{'Within +/-1.0 percentile':<26} | {w1_a:<24.1f}% | {w1_b:<19.1f}% | {'MODEL A' if w1_a > w1_b else 'MODEL B'}")
+print(f"{'Within +/-3.0 percentile':<26} | {w3_a:<24.1f}% | {w3_b:<19.1f}% | {'MODEL A' if w3_a > w3_b else 'MODEL B'}")
+print(f"{'Within +/-5.0 percentile':<26} | {w5_a:<24.1f}% | {w5_b:<19.1f}% | {'MODEL A' if w5_a > w5_b else 'MODEL B'}")
+print("=" * 85)
+
+# Per-Test Breakdown
 unique_tests = np.unique(point_test_names)
-test_stats = []
+test_comparison = []
+
+wins_a = 0
+wins_b = 0
 
 for t_name in unique_tests:
     mask = (point_test_names == t_name)
-    t_err = errors[mask]
-    test_stats.append({
+    m_err_a = float(np.mean(err_a[mask]))
+    m_err_b = float(np.mean(err_b[mask]))
+    if m_err_a < m_err_b:
+        wins_a += 1
+    else:
+        wins_b += 1
+    test_comparison.append({
         "testName": t_name,
-        "sampleCount": int(len(t_err)),
-        "mae": float(np.mean(t_err)),
-        "median": float(np.median(t_err)),
-        "maxError": float(np.max(t_err)),
-        "within_3pts": float((t_err < 3).mean() * 100),
-        "within_5pts": float((t_err < 5).mean() * 100)
+        "sampleCount": int(np.sum(mask)),
+        "mae_a": round(m_err_a, 2),
+        "mae_b": round(m_err_b, 2),
+        "winner": "A" if m_err_a < m_err_b else "B"
     })
 
-# Sort by MAE
-test_stats.sort(key=lambda x: x["mae"])
-best_test = test_stats[0]
-worst_test = test_stats[-1]
+print(f"\nTest-by-Test Winner Breakdown (out of {len(unique_tests)} tests):")
+print(f"  * Model A won: {wins_a} tests ({(wins_a/len(unique_tests)*100):.1f}%)")
+print(f"  * Model B won: {wins_b} tests ({(wins_b/len(unique_tests)*100):.1f}%)")
 
-# Also find test with absolute maximum single error
-test_with_max_peak_error = max(test_stats, key=lambda x: x["maxError"])
+# Determine Best Overall Model
+chosen_model = model_a if mae_a <= mae_b else model_b
+chosen_name = "Model A (Institute Only)" if mae_a <= mae_b else "Model B (Combined)"
+print(f"\n>>> PRIMARY MODEL SELECTED FOR DEPLOYMENT: {chosen_name} <<<")
 
-print("\n" + "="*70)
-print("                         TEST-LEVEL BREAKDOWN                           ")
-print("="*70)
-print(f"Total Unique Tests Evaluated: {len(test_stats)}")
-print(f"\n★ BEST PREDICTED TEST (Lowest MAE):")
-print(f"  '{best_test['testName']}'")
-print(f"  MAE: {best_test['mae']:.2f} pts | Max: {best_test['maxError']:.2f} pts | Within ±3pts: {best_test['within_3pts']:.1f}% ({best_test['sampleCount']} samples)")
+# ── Save Helper ───────────────────────────────────────────────────────────────
 
-print(f"\n▲ WORST PREDICTED TEST (Highest MAE):")
-print(f"  '{worst_test['testName']}'")
-print(f"  MAE: {worst_test['mae']:.2f} pts | Max: {worst_test['maxError']:.2f} pts | Within ±3pts: {worst_test['within_3pts']:.1f}% ({worst_test['sampleCount']} samples)")
+def export_tfjs(model, target_dir, model_name):
+    os.makedirs(target_dir, exist_ok=True)
+    weights_manifest = []
+    weight_specs = []
+    bin_bytes = bytearray()
+    for layer in model.layers:
+        for w in layer.weights:
+            base_name = w.name.split(":")[0]
+            w_name = f"{layer.name}/{base_name}" if "/" not in base_name else base_name
+            arr = w.numpy()
+            weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
+            bin_bytes.extend(arr.astype("<f4").tobytes())
 
-print(f"\n▲ TEST WITH HIGHEST PEAK ERROR:")
-print(f"  '{test_with_max_peak_error['testName']}'")
-print(f"  Peak Error: {test_with_max_peak_error['maxError']:.2f} pts | MAE: {test_with_max_peak_error['mae']:.2f} pts")
+    shard_name = "group1-shard1of1.bin"
+    weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
 
-print("\n" + "-"*70)
-print(f"{'TEST NAME':<44} | {'SAMPLES':<7} | {'MAE':<7} | {'MAX ERR':<7}")
-print("-"*70)
-print("Top 3 Best Tests:")
-for t in test_stats[:3]:
-    print(f"  {t['testName'][:42]:<42} | {t['sampleCount']:<7} | {t['mae']:<7.2f} | {t['maxError']:<7.2f}")
-print("\nTop 3 Hardest Tests:")
-for t in test_stats[-3:]:
-    print(f"  {t['testName'][:42]:<42} | {t['sampleCount']:<7} | {t['mae']:<7.2f} | {t['maxError']:<7.2f}")
-print("="*70)
+    model_config = model.get_config()
+    layers = model_config.get("layers", [])
 
-# ── Save ──────────────────────────────────────────────────────────────────────
-
-weights_manifest = []
-weight_specs = []
-bin_bytes = bytearray()
-for layer in model.layers:
-    for w in layer.weights:
-        base_name = w.name.split(":")[0]
-        w_name = f"{layer.name}/{base_name}" if "/" not in base_name else base_name
-        arr = w.numpy()
-        weight_specs.append({"name": w_name, "shape": list(arr.shape), "dtype": "float32"})
-        bin_bytes.extend(arr.astype("<f4").tobytes())
-
-shard_name = "group1-shard1of1.bin"
-weights_manifest.append({"paths": [shard_name], "weights": weight_specs})
-
-with open(f"output/ranknet/{shard_name}", "wb") as f:
-    f.write(bin_bytes)
-
-# Ensure InputLayer config has ONLY batch_input_shape (not both inputShape and batchInputShape)
-model_config = model.get_config()
-layers = model_config.get("layers", [])
-
-if layers and layers[0].get("class_name") != "InputLayer":
-    layers.insert(0, {
-        "class_name": "InputLayer",
-        "config": {
-            "batch_input_shape": [None, 4],
-            "dtype": "float32",
-            "sparse": False,
-            "name": "input_1"
-        }
-    })
-
-for layer_obj in layers:
-    cfg = layer_obj.get("config", {})
-    if layer_obj.get("class_name") == "InputLayer":
-        b_shape = cfg.get("batch_input_shape") or cfg.get("batch_shape") or [None, 4]
-        cfg.clear()
-        cfg["batch_input_shape"] = b_shape
-        cfg["dtype"] = "float32"
-        cfg["sparse"] = False
-        cfg["name"] = "input_1"
-
-model_json = {
-    "format": "layers-model",
-    "generatedBy": "keras v2.15.0",
-    "convertedBy": "TensorFlow.js Exporter",
-    "modelTopology": {
-        "keras_version": "2.15.0",
-        "backend": "tensorflow",
-        "model_config": {
-            "class_name": "Sequential",
+    if layers and layers[0].get("class_name") != "InputLayer":
+        layers.insert(0, {
+            "class_name": "InputLayer",
             "config": {
-                "name": "ranknet",
-                "layers": layers
+                "batch_input_shape": [None, 4],
+                "dtype": "float32",
+                "sparse": False,
+                "name": "input_1"
             }
-        }
-    },
-    "weightsManifest": weights_manifest
-}
+        })
 
-with open("output/ranknet/model.json", "w", encoding="utf-8") as f:
-    json.dump(model_json, f, indent=2)
+    for layer_obj in layers:
+        cfg = layer_obj.get("config", {})
+        if layer_obj.get("class_name") == "InputLayer":
+            b_shape = cfg.get("batch_input_shape") or cfg.get("batch_shape") or [None, 4]
+            cfg.clear()
+            cfg["batch_input_shape"] = b_shape
+            cfg["dtype"] = "float32"
+            cfg["sparse"] = False
+            cfg["name"] = "input_1"
+
+    model_json = {
+        "format": "layers-model",
+        "generatedBy": "keras v2.15.0",
+        "convertedBy": "TensorFlow.js Exporter",
+        "modelTopology": {
+            "keras_version": "2.15.0",
+            "backend": "tensorflow",
+            "model_config": {
+                "class_name": "Sequential",
+                "config": {
+                    "name": model_name,
+                    "layers": layers
+                }
+            }
+        },
+        "weightsManifest": weights_manifest
+    }
+
+    with open(os.path.join(target_dir, shard_name), "wb") as f:
+        f.write(bin_bytes)
+    with open(os.path.join(target_dir, "model.json"), "w", encoding="utf-8") as f:
+        json.dump(model_json, f, indent=2)
+
+# Export primary chosen model to output/ranknet/ and web_model/
+export_tfjs(chosen_model, "output/ranknet", "ranknet")
+export_tfjs(chosen_model, "web_model", "ranknet")
+
+# Also save both individual models for reference/artifacts
+export_tfjs(model_a, "output/ranknet_institute", "ranknet_institute")
+export_tfjs(model_b, "output/ranknet_combined", "ranknet_combined")
 
 meta = {
-    "inputs":       ["z", "x_norm", "difficulty", "maxMarks_norm"],
-    "output":       "percentile (0-1)",
-    "avg_N":        avg_N,
-    "maxMarks_ref": 300,
+    "name": "RankNet Model Benchmark & Deployment Engine",
+    "selected_model": chosen_name,
     "stat_constants": {
         "slope_tgn":     SLOPE_TGN,
         "intercept_tgn": INTERCEPT_TGN,
         "slope_k":       SLOPE_K,
         "intercept_k":   INTERCEPT_K
     },
-    "evaluation": {
-        "overall": {
-            "mae_percentile_pts": round(overall_mae, 2),
-            "median_pts":         round(overall_median, 2),
-            "rmse_pts":           round(overall_rmse, 2),
-            "max_error_pts":      round(overall_max, 2),
-            "within_1pt":         round(w_1, 1),
-            "within_2pts":        round(w_2, 1),
-            "within_3pts":        round(w_3, 1),
-            "within_5pts":        round(w_5, 1),
-            "within_10pts":       round(w_10, 1)
+    "benchmark": {
+        "model_a_institute": {
+            "training_samples": len(X_inst),
+            "mae": round(mae_a, 2),
+            "median": round(med_a, 2),
+            "rmse": round(rmse_a, 2),
+            "max_error": round(max_a, 2),
+            "within_3pts": round(w3_a, 1),
+            "within_5pts": round(w5_a, 1)
         },
-        "worst_test_by_mae": {
-            "name": worst_test["testName"],
-            "mae": round(worst_test["mae"], 2),
-            "max_error": round(worst_test["maxError"], 2),
-            "samples": worst_test["sampleCount"]
+        "model_b_combined": {
+            "training_samples": len(X_comb),
+            "checkthis_samples_added": len(checkthis_points),
+            "mae": round(mae_b, 2),
+            "median": round(med_b, 2),
+            "rmse": round(rmse_b, 2),
+            "max_error": round(max_b, 2),
+            "within_3pts": round(w3_b, 1),
+            "within_5pts": round(w5_b, 1)
         },
-        "best_test_by_mae": {
-            "name": best_test["testName"],
-            "mae": round(best_test["mae"], 2),
-            "max_error": round(best_test["maxError"], 2),
-            "samples": best_test["sampleCount"]
+        "tests_won": {
+            "model_a": wins_a,
+            "model_b": wins_b
         },
-        "test_with_max_peak_error": {
-            "name": test_with_max_peak_error["testName"],
-            "peak_error": round(test_with_max_peak_error["maxError"], 2),
-            "mae": round(test_with_max_peak_error["mae"], 2)
-        },
-        "all_tests": test_stats
+        "all_tests": test_comparison
     }
 }
 
-with open("output/ranknet/meta.json", "w", encoding="utf-8") as f:
-    json.dump(meta, f, indent=2)
+for d in ["output/ranknet", "output/ranknet_institute", "output/ranknet_combined", "output", "web_model"]:
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
 
-print(f"\nSaved → output/ranknet/model.json & group1-shard1of1.bin")
-print(f"Saved → output/ranknet/meta.json with full test breakdown")
+print("\nSuccessfully saved all models and comparative benchmark metadata!")
+print(f"  - Deployed best model to output/ranknet/ ({chosen_name})")
+print(f"  - Preserved Model A in output/ranknet_institute/")
+print(f"  - Preserved Model B in output/ranknet_combined/")
